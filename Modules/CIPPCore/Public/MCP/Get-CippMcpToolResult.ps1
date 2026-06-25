@@ -43,6 +43,19 @@ function Get-CippMcpToolResult {
         }
     }
 
+    # Restore any OData parameter names that were sanitized in the inputSchema (e.g. 'select' -> '$select').
+    # Get-CippMcpToolList strips leading '$' from property keys to satisfy JSON Schema draft 2020-12;
+    # _paramMap holds the reverse mapping so the underlying endpoint receives the original names.
+    $ParamMap = $Tool._paramMap
+    if ($ParamMap -and $ParamMap.Count -gt 0) {
+        $Translated = @{}
+        foreach ($Key in @($ArgHash.Keys)) {
+            $OrigKey = if ($ParamMap.Contains($Key)) { $ParamMap[$Key] } else { $Key }
+            $Translated[$OrigKey] = $ArgHash[$Key]
+        }
+        $ArgHash = $Translated
+    }
+
     # Clone caller headers (preserves the EasyAuth principal) and tag the origin for auditing.
     $Headers = @{}
     if ($Request.Headers) {
