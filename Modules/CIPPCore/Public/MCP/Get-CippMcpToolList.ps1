@@ -24,7 +24,8 @@ function Get-CippMcpToolList {
     )
 
     # Build (and cache) the full read-only tool list. Each cached entry carries an internal _category
-    # (top-level OpenAPI tag) used only for filtering; it is stripped before the list is returned.
+    # (top-level OpenAPI tag) and _paramMap (sanitized->original name map for OData $ params) used
+    # only internally; both are stripped before the list is returned to callers.
     if (-not $script:CippMcpToolListCache -or $Force) {
         $Spec = Get-CippMcpSpec
         $Tools = [System.Collections.Generic.List[object]]::new()
@@ -51,6 +52,11 @@ function Get-CippMcpToolList {
 
                 $Properties = [ordered]@{}
                 $RequiredList = [System.Collections.Generic.List[string]]::new()
+                # Tracks sanitized-name -> original-name for any parameter whose name contained a
+                # leading '$' (OData query params: $select, $filter, $top, $orderby, $count, etc.).
+                # Property keys beginning with '$' are invalid in JSON Schema draft 2020-12, so we
+                # strip the prefix in the schema and use this map to restore it before dispatch.
+                $ParamMap = @{}
 
                 # Query / path parameters.
                 foreach ($ParamRaw in @($Op['parameters'])) {
@@ -58,8 +64,11 @@ function Get-CippMcpToolList {
                     $Param = Resolve-CippMcpNode -Node $ParamRaw -Spec $Spec
                     if ($Param['in'] -notin @('query', 'path')) { continue }
                     $Schema = if ($Param['schema']) { $Param['schema'] } else { @{ type = 'string' } }
-                    $Properties[[string]$Param['name']] = $Schema
-                    if ($Param['required']) { $RequiredList.Add([string]$Param['name']) }
+                    $OrigName = [string]$Param['name']
+                    $SafeName = $OrigName -replace '^\$', ''
+                    $Properties[$SafeName] = $Schema
+                    if ($Param['required']) { $RequiredList.Add($SafeName) }
+                    if ($OrigName -ne $SafeName) { $ParamMap[$SafeName] = $OrigName }
                 }
 
                 # Request body (uncommon for reads; included for completeness).
@@ -67,9 +76,14 @@ function Get-CippMcpToolList {
                     $BodySchema = Resolve-CippMcpNode -Node $Op['requestBody']['content']['application/json']['schema'] -Spec $Spec
                     if ($BodySchema -and $BodySchema['properties']) {
                         foreach ($BodyProp in $BodySchema['properties'].GetEnumerator()) {
-                            $Properties[[string]$BodyProp.Key] = $BodyProp.Value
+                            $OrigName = [string]$BodyProp.Key
+                            $SafeName = $OrigName -replace '^\$', ''
+                            $Properties[$SafeName] = $BodyProp.Value
+                            if ($OrigName -ne $SafeName) { $ParamMap[$SafeName] = $OrigName }
                         }
-                        foreach ($Req in @($BodySchema['required'])) { if ($Req) { $RequiredList.Add([string]$Req) } }
+                        foreach ($Req in @($BodySchema['required'])) {
+                            if ($Req) { $RequiredList.Add(([string]$Req) -replace '^\$', '') }
+                        }
                     }
                 }
 
@@ -90,6 +104,7 @@ function Get-CippMcpToolList {
                         inputSchema = $InputSchema
                         annotations = [ordered]@{ title = $Endpoint; readOnlyHint = $true }
                         _category   = $Category
+                        _paramMap   = $ParamMap
                     })
             }
         }
@@ -120,7 +135,7 @@ function Get-CippMcpToolList {
 
     Write-Information "[MCP] tools/list -> $($Filtered.Count) tools (tags='$TagFilter' tools='$ToolFilter' first='$Limit')"
 
-    # Project to the wire shape (drop the internal _category).
+    # Project to the wire shape (drop internal fields).
     return @($Filtered | ForEach-Object {
             [ordered]@{
                 name        = $_.name
