@@ -66,7 +66,7 @@ function Get-CippMcpToolList {
                     $Schema = if ($Param['schema']) { $Param['schema'] } else { @{ type = 'string' } }
                     $OrigName = [string]$Param['name']
                     $SafeName = $OrigName -replace '^\$', ''
-                    $Properties[$SafeName] = $Schema
+                    $Properties[$SafeName] = Clean-CippMcpSchema -Schema $Schema
                     if ($Param['required']) { $RequiredList.Add($SafeName) }
                     if ($OrigName -ne $SafeName) { $ParamMap[$SafeName] = $OrigName }
                 }
@@ -78,7 +78,7 @@ function Get-CippMcpToolList {
                         foreach ($BodyProp in $BodySchema['properties'].GetEnumerator()) {
                             $OrigName = [string]$BodyProp.Key
                             $SafeName = $OrigName -replace '^\$', ''
-                            $Properties[$SafeName] = $BodyProp.Value
+                            $Properties[$SafeName] = Clean-CippMcpSchema -Schema $BodyProp.Value
                             if ($OrigName -ne $SafeName) { $ParamMap[$SafeName] = $OrigName }
                         }
                         foreach ($Req in @($BodySchema['required'])) {
@@ -147,6 +147,61 @@ function Get-CippMcpToolList {
                 annotations = $_.annotations
             }
         })
+}
+
+function Clean-CippMcpSchema {
+    # Strips non-JSON-Schema-2020-12 keywords from a schema so that Anthropic's tool-use
+    # validator accepts it. OpenAPI extension keys (x-*) and any dollar-prefixed keys other
+    # than the standard JSON Schema vocabulary ($ref, $id, $schema, $anchor, $defs, $comment,
+    # $dynamicRef, $dynamicAnchor) are removed. Property keys that start with '$' are also
+    # renamed (leading '$' stripped) to satisfy Anthropic's property-name pattern constraint.
+    # Operates recursively; safe to call on any schema object.
+    [CmdletBinding()]
+    param($Schema, [int]$Depth = 0)
+
+    if ($null -eq $Schema -or $Depth -gt 15) { return $Schema }
+    if ($Schema -isnot [System.Collections.IDictionary]) { return $Schema }
+
+    $AllowedDollar = @('$ref','$id','$schema','$anchor','$defs','$comment','$dynamicRef','$dynamicAnchor')
+    $Out = [ordered]@{}
+
+    foreach ($Entry in $Schema.GetEnumerator()) {
+        $Key = [string]$Entry.Key
+
+        # Drop OpenAPI extension keywords — not valid JSON Schema and may trip validators.
+        if ($Key -match '^x-') { continue }
+
+        # Drop non-standard dollar-prefixed keys.
+        if ($Key.StartsWith('$') -and $Key -notin $AllowedDollar) { continue }
+
+        $Val = $Entry.Value
+
+        # Recurse into sub-schemas.
+        if ($Key -in @('items','additionalProperties','not','if','then','else','contains','propertyNames','unevaluatedItems','unevaluatedProperties')) {
+            $Out[$Key] = Clean-CippMcpSchema -Schema $Val -Depth ($Depth + 1)
+        } elseif ($Key -in @('allOf','anyOf','oneOf') -and $Val -is [System.Collections.IEnumerable]) {
+            $Out[$Key] = @($Val | ForEach-Object { Clean-CippMcpSchema -Schema $_ -Depth ($Depth + 1) })
+        } elseif ($Key -eq 'properties' -and $Val -is [System.Collections.IDictionary]) {
+            $CleanProps = [ordered]@{}
+            foreach ($PropEntry in $Val.GetEnumerator()) {
+                # Strip leading '$' from nested property keys to satisfy Anthropic's name pattern.
+                $PropKey = ([string]$PropEntry.Key) -replace '^\$', ''
+                $CleanProps[$PropKey] = Clean-CippMcpSchema -Schema $PropEntry.Value -Depth ($Depth + 1)
+            }
+            $Out[$Key] = $CleanProps
+        } elseif ($Key -eq 'definitions' -and $Val -is [System.Collections.IDictionary]) {
+            # Convert draft-04 'definitions' to '$defs' (2020-12 equivalent).
+            $CleanDefs = [ordered]@{}
+            foreach ($DefEntry in $Val.GetEnumerator()) {
+                $CleanDefs[[string]$DefEntry.Key] = Clean-CippMcpSchema -Schema $DefEntry.Value -Depth ($Depth + 1)
+            }
+            $Out['$defs'] = $CleanDefs
+        } else {
+            $Out[$Key] = $Val
+        }
+    }
+
+    return $Out
 }
 
 function Resolve-CippMcpNode {
