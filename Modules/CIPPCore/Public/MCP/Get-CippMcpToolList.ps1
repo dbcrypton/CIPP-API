@@ -82,7 +82,10 @@ function Get-CippMcpToolList {
                             if ($OrigName -ne $SafeName) { $ParamMap[$SafeName] = $OrigName }
                         }
                         foreach ($Req in @($BodySchema['required'])) {
-                            if ($Req) { $RequiredList.Add(([string]$Req) -replace '^\$', '') }
+                            if ($Req) {
+                                $SafeReq = [string]$Req -replace '^\$', ''
+                                $RequiredList.Add($SafeReq)
+                            }
                         }
                     }
                 }
